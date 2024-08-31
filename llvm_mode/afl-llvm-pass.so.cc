@@ -351,8 +351,12 @@ bool AFLCoverage::runOnModule(Module &M) {
             if(stringValue.find(brInst)!=stringValue.end()||checkCondition(brInst->getCondition())){
               /* Debug Msg */
               const DILocation *loc = brInst->getDebugLoc().get();
-              errs()<<loc->getFilename()<<"    <<Line>>:"<<loc->getLine()<<"\n";
-          
+              if (loc) { // 检查 loc 是否为空
+                errs() << loc->getFilename() << "    Line: " << loc->getLine() << "\n";
+              }else {
+                errs() << "No debug location available\n";
+              }
+
               /* Visit */
               BasicBlock *trueBB = brInst->getSuccessor(0);
               ConstantInt *Pass_Loc = ConstantInt::get(Int32Ty, basicBlockMap[trueBB]);    
