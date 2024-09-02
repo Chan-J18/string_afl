@@ -192,17 +192,19 @@ void AFLCoverage::handleFunc(Function *func){
         bool isHandle = false;
         std::unordered_set<Value*> tmpValueSet;
 
-        for (Argument &arg : calledFunc->args()) {
-          Value *actualArg = calle->getArgOperand(argIndex);
-          if(isOprendStringRelated(actualArg)){
-            isHandle = true;
-            stringValue.insert(calle);
-            stringValue.insert(&arg);
-            tmpValueSet.insert(&arg);
+        if(calledFunc){
+          for (Argument &arg : calledFunc->args()) {
+            Value *actualArg = calle->getArgOperand(argIndex);
+            if(isOprendStringRelated(actualArg)){
+              isHandle = true;
+              stringValue.insert(calle);
+              stringValue.insert(&arg);
+              tmpValueSet.insert(&arg);
+            }
+            argIndex++;
           }
-          argIndex++;
         }
-
+        
         if(isHandle&&handledFunc.find(calledFunc->getName().str())==handledFunc.end()){  
           handleFunc(calledFunc);
           /* remove the function arg value to keep other function work well. */
