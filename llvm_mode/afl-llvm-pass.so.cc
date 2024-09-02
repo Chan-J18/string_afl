@@ -350,6 +350,7 @@ bool AFLCoverage::runOnModule(Module &M) {
             /* If brInst is string related, insert visit couter, insert pass_loc */
             if(stringValue.find(brInst)!=stringValue.end()||checkCondition(brInst->getCondition())){
               /* Debug Msg */
+              inst_blocks++;
               const DILocation *loc = brInst->getDebugLoc().get();
               if (loc) { // 检查 loc 是否为空
                 errs() << loc->getFilename() << "    Line: " << loc->getLine() << "\n";
@@ -400,7 +401,7 @@ bool AFLCoverage::runOnModule(Module &M) {
           IRB.CreateStore(ConstantInt::get(Int32Ty, cur_loc >> 1), AFLPrevLoc);
       Store->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
 
-      inst_blocks++;
+
     }
   
   /* Say something nice. */
