@@ -349,7 +349,7 @@ bool AFLCoverage::runOnModule(Module &M) {
 
           BranchInst *brInst = dyn_cast<BranchInst>(lastInst);
 
-          if (brInst->isConditional())
+          if (brInst->isConditional()){
             br++;
             /* If brInst is string related, insert visit couter, insert pass_loc */
             if(stringValue.find(brInst)!=stringValue.end()||checkCondition(brInst->getCondition())){
@@ -369,7 +369,8 @@ bool AFLCoverage::runOnModule(Module &M) {
             
               /* Pass */
               passSet.insert(std::pair<u32,u32>(basicBlockMap[trueBB],cur_loc));
-            } 
+            }
+          } 
         }
       }
 
@@ -414,7 +415,7 @@ bool AFLCoverage::runOnModule(Module &M) {
   if (!be_quiet) {
 
     if (!br) WARNF("No instrumentation targets found.");
-    else OKF("Instrumented %u locations, the number of all conditional  branch %u  (%s mode, ratio %u%%).",
+    else OKF("Instrumented %u locations, the number of all conditional branch %u  (%s mode, ratio %u%%).",
              inst_br,br, getenv("AFL_HARDEN") ? "hardened" :
              ((getenv("AFL_USE_ASAN") || getenv("AFL_USE_MSAN")) ?
               "ASAN/MSAN" : "non-hardened"), inst_ratio);
