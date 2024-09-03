@@ -315,7 +315,8 @@ bool AFLCoverage::runOnModule(Module &M) {
 
   /* Instrument all the things! */
 
-  int inst_blocks = 0;
+  int inst_br = 0;
+  int br = 0 ;
   Function* mainFunc =  M.getFunction("main");
   
   /* 
@@ -349,10 +350,11 @@ bool AFLCoverage::runOnModule(Module &M) {
           BranchInst *brInst = dyn_cast<BranchInst>(lastInst);
 
           if (brInst->isConditional())
+            br++;
             /* If brInst is string related, insert visit couter, insert pass_loc */
             if(stringValue.find(brInst)!=stringValue.end()||checkCondition(brInst->getCondition())){
               /* Debug Msg */
-              inst_blocks++;
+              inst_br++;
               const DILocation *loc = brInst->getDebugLoc().get();
               if (loc) { // 检查 loc 是否为空
                 errs() << loc->getFilename() << "    Line: " << loc->getLine() << "\n";
@@ -411,9 +413,9 @@ bool AFLCoverage::runOnModule(Module &M) {
   
   if (!be_quiet) {
 
-    if (!inst_blocks) WARNF("No instrumentation targets found.");
-    else OKF("Instrumented %u locations (%s mode, ratio %u%%).",
-             inst_blocks, getenv("AFL_HARDEN") ? "hardened" :
+    if (!br) WARNF("No instrumentation targets found.");
+    else OKF("Instrumented %u locations, the number of all conditional  branch %u  (%s mode, ratio %u%%).",
+             inst_br,br, getenv("AFL_HARDEN") ? "hardened" :
              ((getenv("AFL_USE_ASAN") || getenv("AFL_USE_MSAN")) ?
               "ASAN/MSAN" : "non-hardened"), inst_ratio);
 
