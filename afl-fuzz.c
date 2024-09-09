@@ -170,6 +170,8 @@ EXP_ST u32 br_string_pass[MAP_SIZE],
            seed_first_pass[MAP_SIZE],
            seed_first_visit[MAP_SIZE];
 
+EXP_ST u64 seed_num_visit=0,seed_num_pass=0;
+
 static volatile u8 stop_soon,         /* Ctrl-C pressed?                  */
                    clear_screen = 1,  /* Window resized?                  */
                    child_timed_out;   /* Traced process timed out?        */
@@ -910,7 +912,7 @@ EXP_ST void write_bitmap(void) {
 
   close(fd);
 
-  /* Save Seed Visit Bitmap  */
+  /* Save Seed Visit Bitmap  每个分支，种子的访问数量*/
   fname = alloc_printf("%s/seed_visit_bitmap", out_dir);
   fd = open(fname, O_WRONLY | O_CREAT | O_TRUNC, 0600);
 
@@ -920,7 +922,7 @@ EXP_ST void write_bitmap(void) {
 
   close(fd);
 
-  /* Save Seed Pass Bitmap  */
+  /* Save Seed Pass Bitmap  每个分支，种子的通过数量*/
   fname = alloc_printf("%s/seed_pass_bitmap", out_dir);
   fd = open(fname, O_WRONLY | O_CREAT | O_TRUNC, 0600);
 
@@ -948,6 +950,26 @@ EXP_ST void write_bitmap(void) {
   if (fd < 0) PFATAL("Unable to open '%s'", fname);
 
   ck_write(fd, seed_first_pass, sizeof(u32) * MAP_SIZE, fname);
+
+  close(fd);
+
+  /* Save Seed Pass Num  */
+  fname = alloc_printf("%s/seed_pass_num", out_dir);
+  fd = open(fname, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+
+  if (fd < 0) PFATAL("Unable to open '%s'", fname);
+
+  ck_write(fd, seed_num_pass, sizeof(u64), fname);
+
+  close(fd);
+
+  /* Save Seed Visit Num  */
+  fname = alloc_printf("%s/seed_visit_num", out_dir);
+  fd = open(fname, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+
+  if (fd < 0) PFATAL("Unable to open '%s'", fname);
+
+  ck_write(fd, seed_num_visit, sizeof(u64), fname);
 
   close(fd);
 
@@ -2566,6 +2588,7 @@ static u8 run_target(char** argv, u32 timeout) {
 
       br_string_pass[i]+=pass_string_cov[i];
       seed_string_pass[i]++;
+      seed_num_pass++;
       if(seed_first_pass[i]==0){
         seed_first_pass[i]=total_execs;
       }
@@ -2575,6 +2598,8 @@ static u8 run_target(char** argv, u32 timeout) {
 
       br_string_visit[i]+=basic_blk_cov[i];
       seed_string_visit[i]++;
+      seed_num_visit++;
+
       if(seed_first_visit[i]==0){
         seed_first_visit[i]=total_execs;
       }
