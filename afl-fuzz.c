@@ -959,7 +959,7 @@ EXP_ST void write_bitmap(void) {
 
   if (fd < 0) PFATAL("Unable to open '%s'", fname);
 
-  ssize_t result = write(fd, &seed_num_pass, sizeof(seed_num_pass));
+  write(fd, &seed_num_pass, sizeof(seed_num_pass));
     
   close(fd);
 
@@ -969,7 +969,7 @@ EXP_ST void write_bitmap(void) {
 
   if (fd < 0) PFATAL("Unable to open '%s'", fname);
 
-  ssize_t result = write(fd, &seed_num_visit, sizeof(seed_num_visit));
+  write(fd, &seed_num_visit, sizeof(seed_num_visit));
 
   close(fd);
 
