@@ -2583,28 +2583,34 @@ static u8 run_target(char** argv, u32 timeout) {
 
   setitimer(ITIMER_REAL, &it, NULL);
 
+  int  is_seed_visit = 0;
+  int is_seed_pass = 0;
+  
   for(int i=0;i<MAP_SIZE;i++){
     if(pass_string_cov[i]!=0){
 
       br_string_pass[i]+=pass_string_cov[i];
       seed_string_pass[i]++;
-      seed_num_pass++;
       if(seed_first_pass[i]==0){
         seed_first_pass[i]=total_execs;
       }
+      if(!is_seed_pass) is_seed_pass = 1;
     }
 
     if(basic_blk_cov[i]!=0){
 
       br_string_visit[i]+=basic_blk_cov[i];
       seed_string_visit[i]++;
-      seed_num_visit++;
 
       if(seed_first_visit[i]==0){
         seed_first_visit[i]=total_execs;
       }
+      if(!is_seed_visit) is_seed_visit=1;
     }
   }
+
+  if(is_seed_pass) seed_num_pass++;
+  if(is_seed_visit) seed_num_visit++;
 
 
   total_execs++;
