@@ -162,6 +162,8 @@ static s32 pass_shm_id;                 /* ID of the Basic block region     */
 
 EXP_ST u32* basic_blk_cov;            /* SHM with bitmap for block hits   */
 EXP_ST u32* pass_string_cov;            /* SHM with bitmap for block hits   */
+EXP_ST u8 is_seed_visit=0,
+          is_seed_pass=0;
 
 EXP_ST u32 br_string_pass[MAP_SIZE],
            br_string_visit[MAP_SIZE], 
@@ -2582,9 +2584,6 @@ static u8 run_target(char** argv, u32 timeout) {
   it.it_value.tv_usec = 0;
 
   setitimer(ITIMER_REAL, &it, NULL);
-
-  int  is_seed_visit = 0;
-  int is_seed_pass = 0;
   
   for(int i=0;i<MAP_SIZE;i++){
     if(pass_string_cov[i]!=0){
@@ -2609,8 +2608,6 @@ static u8 run_target(char** argv, u32 timeout) {
     }
   }
 
-  if(is_seed_pass) seed_num_pass++;
-  if(is_seed_visit) seed_num_visit++;
 
 
   total_execs++;
@@ -4849,8 +4846,18 @@ EXP_ST u8 common_fuzz_stuff(char** argv, u8* out_buf, u32 len) {
   }
 
   /* This handles FAULT_ERROR for us: */
+  u8 is_saved = save_if_interesting(argv, out_buf, len, fault);
+  queued_discovered += is_saved;
+  
+  if(is_saved&&is_seed_pass) {
+    seed_num_pass++;
+    is_seed_pass=0;
+  }
 
-  queued_discovered += save_if_interesting(argv, out_buf, len, fault);
+  if(is_saved&&is_seed_visit) {
+    seed_num_visit++;
+    is_seed_visit=0;
+  }
 
   if (!(stage_cur % stats_update_freq) || stage_cur + 1 == stage_max)
     show_stats();
