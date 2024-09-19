@@ -165,6 +165,10 @@ static void setup_shm(void) {
   
   if (trace_bits == (void *)-1) PFATAL("shmat() failed");
 
+
+  // 加入 其他bitmap
+
+
 }
 
 /* Write results. */
@@ -624,6 +628,9 @@ static char** get_qemu_argv(u8* own_loc, char** argv, int argc) {
 }
 
 
+
+
+
 /* Main entry point */
 
 int main(int argc, char** argv) {
@@ -722,6 +729,8 @@ int main(int argc, char** argv) {
 
         /* Another afl-cmin specific feature. */
         at_file = optarg;
+        //at_file类似afl-fuzz设置为.cur_input类型,得到的argv 输入文件路径参数为 .cur_input
+        // 遍历in_dir下文件执行run_target。并在遍历过程中，将文件数据复制到.cur_input中。
         break;
 
       case 'Q':
