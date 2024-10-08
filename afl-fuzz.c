@@ -2608,10 +2608,7 @@ static u8 run_target(char** argv, u32 timeout) {
     }
   }
 
-
-
   total_execs++;
-
   /* Any subsequent operations on trace_bits must not be moved by the
      compiler below this point. Past this location, trace_bits[] behave
      very normally and do not have to be treated as volatile. */

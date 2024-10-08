@@ -49,6 +49,8 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
 #include "llvm/IR/DebugInfoMetadata.h"
+#include "llvm/IR/DebugInfo.h"
+
 using namespace llvm;
 
 namespace {
@@ -62,16 +64,17 @@ namespace {
       std::unordered_map<u32,u32> passSet;
       std::unordered_set<std::string> handledFunc;
       std::unordered_set<Value*> stringValue;
-      std::unordered_set<std::string> checkedFuncNames = {"strcmp", "strncmp", "strlen", "strcpy", "strcat"};
-
+     
       AFLCoverage() : ModulePass(ID) { }
 
       bool doInitialization(Module &M) override;
       bool runOnModule(Module &M) override;
 
-      bool checkCondition(Value *cond);
+      void handleInst(Instruction *inst,  std::unordered_set<Value*> &localStringValue);
       void handleFunc(Function *func);
-      bool isOprendStringRelated(Value* value);
+      bool isOprendStringRelated(Value* value,std::unordered_set<Value*> &localStringValue);
+      bool isMetadateStringRelated(Value* value);
+      bool isTypeStringRelated(DIType* dtype);
       // StringRef getPassName() const override {
       //  return "American Fuzzy Lop Instrumentation";
       // }
@@ -99,167 +102,318 @@ bool AFLCoverage::doInitialization(Module &M) {
     }
 
   for (GlobalVariable &gvar : M.globals()) {
-    if (gvar.hasInitializer()) {
-      Constant *init = gvar.getInitializer();
-      ConstantDataSequential *cs = dyn_cast<ConstantDataSequential>(init);
+
+    Metadata* md = gvar.getMetadata("dbg");
+    
+    if(md){
+      if(isa<DIGlobalVariableExpression>(md)){
       
-      if(cs&&cs->isCString())
-        stringValue.insert(&gvar);
+        DIGlobalVariableExpression *divExpr = dyn_cast<DIGlobalVariableExpression>(md);
+        DIGlobalVariable *divGvar = divExpr->getVariable();
+      
+        if(isTypeStringRelated(divGvar->getType())){
+          stringValue.insert(&gvar);
+        }
+      }
     }
   }
 
   return true;
 }
 
+bool AFLCoverage::isOprendStringRelated(Value *value,std::unordered_set<Value*> &localStringValue){
 
-/* Check condition value : is about string related or not */
-bool AFLCoverage::checkCondition(Value *cond) {
-
-  if(nullptr != cond)
-    /* Check callinstruction function is string api or not */
-    if(isa<Instruction>(cond)){
-      Instruction *I =  dyn_cast<Instruction>(cond);
-      
-      for (Use &U : I->operands()) {
-        Value *Op = U.get();
-      
-        if(nullptr != Op)
-          if(isa<CallInst>(Op)){
-            
-            CallInst *Call = dyn_cast<CallInst>(Op);
-            Function *CalledFunc = Call->getCalledFunction();
-            
-            if(nullptr != CalledFunc)
-              if (checkedFuncNames.find(CalledFunc->getName().str()) != checkedFuncNames.end()) 
-                return true; 
-          }
-      }
-    } /* Check condtion value is in the string related table or not */
-  
-  
-  return false;
-}
-
-
-bool AFLCoverage::isOprendStringRelated(Value *value){
-
-  if(stringValue.find(value)!=stringValue.end()){
+  if(localStringValue.find(value)!=localStringValue.end()||stringValue.find(value)!=stringValue.end()){
     return true;
   }else if(isa<ConstantExpr>(value)){
     ConstantExpr* constExpr = dyn_cast<ConstantExpr>(value);
     if(constExpr->getOpcode() == Instruction::GetElementPtr){
       Value *basePtr =constExpr->getOperand(0);
-      return isOprendStringRelated(basePtr);
+      return isOprendStringRelated(basePtr,localStringValue);
     }
   }
 
   return false;
 }
 
-void AFLCoverage::handleFunc(Function *func){
- 
-  for(BasicBlock &blk: *func){
-    for(Instruction &inst: blk){
-      /*
-        check the oprends of the Instruction
-        is in the string related table ?
-        
-        yes: 
-          check which king of the Instruction:
-            -Call: handleFunc(calledFunc) while inserting the string related arguments
-            into the table;
-            -Store: insert the second oprend value into the table;
-            -Load: insert ... 
-            ... 
-          return true;
-        no: return false;
-     */
+bool AFLCoverage::isMetadateStringRelated(Value* value){
+
+  if(isa<MetadataAsValue>(value)){
+
+    Metadata* md = cast<MetadataAsValue>(*value).getMetadata();
+    
+    if (isa<DILocalVariable>(*md)) {
       
-      if(isa<CallInst>(inst)){
+      DIType* dtype = cast<DILocalVariable>(*md).getType();
 
-        CallInst* calle = dyn_cast<CallInst>(&inst);
-        Function* calledFunc = calle->getCalledFunction();
-        
-        /* if function arguments is string related, insert the responsitive 
-        argument into stringValue 
-        if function is string api (fucntion name is strcmp ...), then insert
-        the the call result value into stringValue.
-        */
-        
-        /* Avoid repeating, insert the handled function into handledFunc */
-        
-        int argIndex = 0;
-        bool isHandle = false;
-        std::unordered_set<Value*> tmpValueSet;
-
-        if(calledFunc){
-          for (Argument &arg : calledFunc->args()) {
-            Value *actualArg = calle->getArgOperand(argIndex);
-            if(isOprendStringRelated(actualArg)){
-              isHandle = true;
-              stringValue.insert(calle);
-              stringValue.insert(&arg);
-              tmpValueSet.insert(&arg);
-            }
-            argIndex++;
-          }
-        }
-        
-        if(isHandle&&handledFunc.find(calledFunc->getName().str())==handledFunc.end()){  
-          handleFunc(calledFunc);
-          /* remove the function arg value to keep other function work well. */
-          for(Value* tV:tmpValueSet)
-            stringValue.erase(tV);
-          handledFunc.insert(calledFunc->getName().str());
-        }
-        
-      }else if(isa<StoreInst>(inst)){
-
-        StoreInst* storeInst = dyn_cast<StoreInst>(&inst);
-        
-        Value* value = storeInst->getValueOperand();
-        Value* address = storeInst->getPointerOperand();
-
-        if(isOprendStringRelated(value))
-          stringValue.insert(address);
-        
-
-      }else if(isa<LoadInst>(inst)){
-
-        LoadInst* loadInst = dyn_cast<LoadInst>(&inst);
-        Value* address = loadInst->getPointerOperand();
-
-        if(isOprendStringRelated(address))
-          stringValue.insert(loadInst);
-          
-
-      }else if(isa<ICmpInst>(inst)||isa<BinaryOperator>(inst)){   
-        
-        Value* op1 = inst.getOperand(0);
-        Value* op2 = inst.getOperand(1);
-
-        if(isOprendStringRelated(op1)||isOprendStringRelated(op2))
-          stringValue.insert(&inst);
-          
-        
-      }else if(isa<BranchInst>(inst)){
-        
-        BranchInst* brInst = dyn_cast<BranchInst>(&inst);
-        
-        if(brInst->isConditional()){
-          Value* cond = brInst->getCondition();
-
-          if(isOprendStringRelated(cond))
-            stringValue.insert(brInst);
-        }
-        
+      if(nullptr == dtype){
+        md->print(errs());
+        errs()<<"\n";
       }
+
+      if(nullptr!=dtype && (dtype)) return true;
+    }
+  }
+  return false;
+}
+
+bool AFLCoverage::isTypeStringRelated(DIType* dtype){
+
+  /* handle dtype because compositeType */
+  if(isa<DICompositeType>(dtype)){
+    
+    DICompositeType* dctype = dyn_cast<DICompositeType>(dtype);
+    
+    //没有baseType，查看name
+    if(!dctype->getBaseType()){
+      if(0==dctype->getName().str().compare("basic_string<char, std::char_traits<char>, std::allocator<char> >")){
+        return true;
+      }else return false;
+    }
+    
+    if(!dctype->getBaseType()->getName().str().compare("char")) return true;
+
+  }else if(isa<DIDerivedType>(dtype)){
+
+    DIDerivedType * ddtype = dyn_cast<DIDerivedType>(dtype);
+    DIType *baseType = ddtype->getBaseType();
+
+    while(isa<DIDerivedType>(baseType)){
+      ddtype = dyn_cast<DIDerivedType>(baseType);
+      baseType = ddtype->getBaseType();
+    }
+    if(ddtype->getName().str().compare("string")) return true;
+    //得到的baseType可能是DICompositeType
+    return isTypeStringRelated(baseType);
+    // if(!baseType->getName().str().compare("char")) return true;
+  }else if(isa<DIBasicType>(dtype)){
+
+    if(!dyn_cast<DIBasicType>(dtype)->getName().str().compare("char")) return true;
+  }
+  return false;
+}
+
+void AFLCoverage::handleInst(Instruction *inst,  std::unordered_set<Value*> &localStringValue){
+  /* check the oprends of the Instruction is in the string related table ?
+    yes: check which king of the Instruction:
+      -Call: handleFunc(calledFunc) while inserting the string related arguments into the table;
+      -Store: insert the second oprend value into the table;
+      -Load: insert ...   return true;
+    no: return false;
+  */
+  if(isa<CallInst>(inst)){
+
+    CallInst* calle = dyn_cast<CallInst>(inst);
+    Function* calledFunc = calle->getCalledFunction();
+
+    /* if the function name is dbg.declare 
+        insert the variable into stringValue 
+    */
+    if(calledFunc){
+        /* if function arguments is string related, insert the responsitive 
+      argument into stringValue 
+      if function is string api (fucntion name is strcmp ...), then insert
+      the the call result value into stringValue.
+      */
+      /* Avoid repeating, insert the handled function into handledFunc */
+      int argIndex = 0;
+      bool isHandle = false;
+
+      // default str api not need to trace function args
+      for (Argument &arg : calledFunc->args()) {
+
+        Value *actualArg = calle->getArgOperand(argIndex);
       
+        if(isOprendStringRelated(actualArg,localStringValue)){
+          
+          isHandle = true;
+          localStringValue.insert(calle);
+        }
+
+        argIndex++;
+      }
+
+      if(isHandle&&!calledFunc->getName().empty()){  
+      
+        std::string funcName = calledFunc->getName().str();
+
+        if(handledFunc.find(funcName)==handledFunc.end()){
+          
+          handledFunc.insert(funcName);
+          handleFunc(calledFunc);
+        }
+      }
+   }
+  }
+  else if(isa<StoreInst>(inst)){
+
+    StoreInst* storeInst = dyn_cast<StoreInst>(inst);
+    
+    Value* value = storeInst->getValueOperand();
+    Value* address = storeInst->getPointerOperand();
+
+    if(isOprendStringRelated(value,localStringValue))
+      localStringValue.insert(address);
+  
+  }else if(isa<LoadInst>(inst)){
+
+    LoadInst* loadInst = dyn_cast<LoadInst>(inst);
+    Value* address = loadInst->getPointerOperand();
+
+    if(isOprendStringRelated(address,localStringValue))
+      localStringValue.insert(loadInst);
+    
+  }else if(isa<ICmpInst>(inst)||isa<BinaryOperator>(inst)){   
+    
+    Value* op1 = inst->getOperand(0);
+    Value* op2 = inst->getOperand(1);
+
+    
+    if(isOprendStringRelated(op1,localStringValue)||isOprendStringRelated(op2,localStringValue))
+      localStringValue.insert(inst);
+        
+  }else if(isa<BranchInst>(inst)){
+    
+    BranchInst* brInst = dyn_cast<BranchInst>(inst);
+    
+    if(brInst->isConditional()){
+      Value* cond = brInst->getCondition();
+
+      if(isOprendStringRelated(cond,localStringValue))
+        localStringValue.insert(brInst);
+    }
+
+  }else if(isa<GetElementPtrInst>(inst)){
+
+    GetElementPtrInst *gepInst = dyn_cast<GetElementPtrInst>(inst);
+
+    Value *basePtr = gepInst->getPointerOperand();
+
+    if(isOprendStringRelated(basePtr,localStringValue))
+      localStringValue.insert(inst);
+
+  }else if(isa<SExtInst>(inst)){
+
+    SExtInst *sextInst = dyn_cast<SExtInst>(inst);
+
+    if(isOprendStringRelated(sextInst->getOperand(0),localStringValue))
+      localStringValue.insert(inst);
+
+  }else if(isa<ZExtInst>(inst)){
+    
+    ZExtInst *zextInst = dyn_cast<ZExtInst>(inst);
+
+    if(isOprendStringRelated(zextInst->getOperand(0),localStringValue))
+      localStringValue.insert(inst);
+
+  }else if(isa<TruncInst>(inst)){
+
+    TruncInst *truncInst = dyn_cast<TruncInst>(inst);
+
+    if(isOprendStringRelated(truncInst->getOperand(0),localStringValue))
+      localStringValue.insert(inst);
+
+  }else if(isa<InvokeInst>(inst)){
+    
+    InvokeInst *invokeInst = dyn_cast<InvokeInst>(inst);
+    Function* calledFunc = invokeInst->getCalledFunction();  
+    bool isHandle = false;
+
+    for (unsigned i = 0; i < invokeInst->getNumArgOperands(); i++) {
+      
+      Value *arg = invokeInst->getArgOperand(i);
+  
+      if(isOprendStringRelated(arg,localStringValue)){
+
+        isHandle = true;
+        localStringValue.insert(invokeInst);
+      }
+    }
+
+    if(calledFunc){
+
+      if(isHandle&&!calledFunc->getName().empty()){  
+      
+        std::string funcName = calledFunc->getName().str();
+
+        if(handledFunc.find(funcName)==handledFunc.end()){
+
+          handledFunc.insert(funcName);
+          handleFunc(calledFunc);
+        }
+      }
+    }
+
+  }else if(isa<PHINode>(inst)){
+    
+    PHINode *phiNode = dyn_cast<PHINode>(inst);
+
+    for (unsigned i = 0; i < phiNode->getNumIncomingValues(); ++i) {
+
+      Value *incomingValue = phiNode->getIncomingValue(i);
+
+      if(isOprendStringRelated(incomingValue, localStringValue))
+      {  
+        localStringValue.insert(phiNode);
+        break;
+      }
     }
   }
 }
 
+void AFLCoverage::handleFunc(Function *func){
 
+  std::unordered_set<Value*> localStringValue;
+
+  for(BasicBlock &blk:*func){
+    for(Instruction &inst:blk){
+      if(isa<CallInst>(inst)){
+
+        CallInst* calle = dyn_cast<CallInst>(&inst);
+        Function* calledFunc = calle->getCalledFunction(); 
+
+        if(calledFunc&&!calledFunc->getName().empty()){
+          
+          if(calledFunc->getName() == "llvm.dbg.declare"||
+            calledFunc->getName() == "llvm.dbg.value"){
+            
+            Value* value = calle->getArgOperand(0);
+            Value *scope = calle->getArgOperand(1);
+
+            if(isMetadateStringRelated(scope)){
+
+              MetadataAsValue *mav = dyn_cast<MetadataAsValue>(value);
+
+              if (mav) {
+
+                ValueAsMetadata* vam = dyn_cast<ValueAsMetadata>(mav->getMetadata());
+                
+                if (vam) {
+
+                  Value* val = vam->getValue();
+                  
+                  if (val) localStringValue.insert(val); 
+                }
+              }         
+            }
+          }
+        } 
+      }
+    }
+  }
+
+  for(BasicBlock &blk: *func){
+    for(Instruction &inst: blk){   
+      handleInst(&inst,localStringValue);
+    }
+  }
+
+  for(Value* value:localStringValue){
+    if(isa<BranchInst>(value)){
+      stringValue.insert(dyn_cast<BranchInst>(value));
+    }
+  }
+}
 
 
 bool AFLCoverage::runOnModule(Module &M) {
@@ -315,33 +469,50 @@ bool AFLCoverage::runOnModule(Module &M) {
 
   /* Instrument all the things! */
 
-  int inst_br = 0;
-  int br = 0 ;
+  int instBrNum = 0;
+  int brNum = 0 ;
   Function* mainFunc =  M.getFunction("main");
-  
-  /* 
-    handleFunc ：
-    handle BasicBlocks of the Function A Set keep handledFunction avoid repeating
+  StringRef soureceFileName;
 
+  for (auto CU : M.debug_compile_units()) {
+
+    StringRef fileName = CU->getFilename();
+   
+    if(soureceFileName.empty())  soureceFileName = fileName;
+    else if(fileName == soureceFileName) break;
+    else return false;
+
+  }
+
+
+  /* handleFunc ：handle BasicBlocks of the Function A Set keep handledFunction avoid repeating
     finish, get a table about the string related values.
   */
-  //handledFunc.insert("main");
+  
+  
   handleFunc(mainFunc);
- 
-  for (auto &F : M)
-    for (auto &BB : F) {
+  
+  // FILE* file = freopen("output.log", "w", stderr);
+  // if (!file) {
+  //   errs() << "Failed to open log file\n";
+  //   return 1;
+  // }
 
+
+  for (auto &F : M){
+    for (auto &BB : F) {
+      
       BasicBlock::iterator IP = BB.getFirstInsertionPt();
       IRBuilder<> IRB(&(*IP));
 
       if (AFL_R(100) >= inst_ratio) continue;
 
       /* Make up cur_loc */
-
+      
       unsigned int cur_loc = basicBlockMap[&BB];
       ConstantInt *CurLoc = ConstantInt::get(Int32Ty, cur_loc);
       Instruction *lastInst = BB.getTerminator();
-
+      
       /* Insert string related counter:
       Check brInst, If is string related, insert couter */
       if(nullptr != lastInst){
@@ -350,26 +521,35 @@ bool AFLCoverage::runOnModule(Module &M) {
           BranchInst *brInst = dyn_cast<BranchInst>(lastInst);
 
           if (brInst->isConditional()){
-            br++;
-            /* If brInst is string related, insert visit couter, insert pass_loc */
-            if(stringValue.find(brInst)!=stringValue.end()||checkCondition(brInst->getCondition())){
-              /* Debug Msg */
-              inst_br++;
-              const DILocation *loc = brInst->getDebugLoc().get();
-              if (loc) { // 检查 loc 是否为空
-                errs() << loc->getFilename() << "    Line: " << loc->getLine() << "\n";
-              }else {
-                errs() << "No debug location available\n";
-              }
 
-              /* Visit */
-              BasicBlock *trueBB = brInst->getSuccessor(0);
-              ConstantInt *Pass_Loc = ConstantInt::get(Int32Ty, basicBlockMap[trueBB]);    
-              IRB.CreateCall(TraceBB,{Pass_Loc,CurLoc});
-            
-              /* Pass */
-              passSet.insert(std::pair<u32,u32>(basicBlockMap[trueBB],cur_loc));
+            /* If brInst is string related, insert visit couter, insert pass_loc */
+            if(stringValue.find(brInst)!=stringValue.end()){
+
+              /* Debug Msg */
+              Metadata *md = brInst->getMetadata("dbg");
+              if(md){
+                if(isa<DILocation>(md)){
+
+                  DILocation *loc = dyn_cast<DILocation>(md);
+
+                  if(soureceFileName == loc->getFilename()){
+
+                    errs() << soureceFileName << "    Line: " << loc->getLine() << "\n";
+
+                    /* Visit */
+                    BasicBlock *trueBB = brInst->getSuccessor(0);
+                    ConstantInt *Pass_Loc = ConstantInt::get(Int32Ty, basicBlockMap[trueBB]);    
+                    IRB.CreateCall(TraceBB,{Pass_Loc,CurLoc});
+                  
+                    /* Pass */
+                    passSet.insert(std::pair<u32,u32>(basicBlockMap[trueBB],cur_loc));
+                    instBrNum++;
+
+                  }
+                }
+              }
             }
+            brNum++;
           } 
         }
       }
@@ -405,18 +585,17 @@ bool AFLCoverage::runOnModule(Module &M) {
       StoreInst *Store =
           IRB.CreateStore(ConstantInt::get(Int32Ty, cur_loc >> 1), AFLPrevLoc);
       Store->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
-
-
     }
+  }
+  // 关闭文件
+  // fclose(file);
   
   /* Say something nice. */
-
-  
   if (!be_quiet) {
 
-    if (!br) WARNF("No instrumentation targets found.");
+    if (!brNum) WARNF("No instrumentation targets found.");
     else OKF("Instrumented %u locations, the number of all conditional branch %u  (%s mode, ratio %u%%).",
-             inst_br,br, getenv("AFL_HARDEN") ? "hardened" :
+             instBrNum,brNum, getenv("AFL_HARDEN") ? "hardened" :
              ((getenv("AFL_USE_ASAN") || getenv("AFL_USE_MSAN")) ?
               "ASAN/MSAN" : "non-hardened"), inst_ratio);
 

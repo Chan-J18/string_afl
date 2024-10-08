@@ -44,8 +44,8 @@
 #include <time.h>
 #include <errno.h>
 #include <signal.h>
-#include <dirent.h>
 #include <fcntl.h>
+#include <dirent.h>
 
 #include <sys/wait.h>
 #include <sys/time.h>
@@ -53,21 +53,42 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/resource.h>
+#include <sys/mman.h>
 
 static s32 child_pid;                 /* PID of the tested program         */
 
 static u8* trace_bits;                /* SHM with instrumentation bitmap   */
 
 static u8 *out_file,                  /* Trace output file                 */
+          *out_dir,
           *doc_path,                  /* Path to docs                      */
           *target_path,               /* Path to target binary             */
-          *at_file;                   /* Substitution string for @@        */
+          *at_file,
+          *in_file,
+          *in_dir;                   /* Substitution string for @@        */
 
 static u32 exec_tmout;                /* Exec timeout (ms)                 */
-
+static u64 total_execs=0;
 static u64 mem_limit = MEM_LIMIT;     /* Memory limit (MB)                 */
 
 static s32 shm_id;                    /* ID of the SHM region              */
+static s32 bb_shm_id;                 /* ID of the Basic block region     */
+static s32 pass_shm_id;                 /* ID of the Basic block region     */
+
+static u32* basic_blk_cov;            /* SHM with bitmap for block hits   */
+static u32* pass_string_cov;            /* SHM with bitmap for block hits   */
+
+static u8 is_seed_visit=0,
+          is_seed_pass=0;
+
+static u32 br_string_pass[MAP_SIZE],
+           br_string_visit[MAP_SIZE], 
+           seed_string_pass[MAP_SIZE],
+           seed_string_visit[MAP_SIZE],
+           seed_first_pass[MAP_SIZE],
+           seed_first_visit[MAP_SIZE];
+
+static u64 seed_num_visit=0,seed_num_pass=0;
 
 static u8  quiet_mode,                /* Hide non-essential messages?      */
            edges_only,                /* Ignore hit counts?                */
@@ -148,26 +169,50 @@ static void remove_shm(void) {
 static void setup_shm(void) {
 
   u8* shm_str;
+  u8* bb_shm_str;
+  u8* pass_shm_str;
 
   shm_id = shmget(IPC_PRIVATE, MAP_SIZE, IPC_CREAT | IPC_EXCL | 0600);
 
   if (shm_id < 0) PFATAL("shmget() failed");
 
+  bb_shm_id = shmget(IPC_PRIVATE, sizeof(u32) * MAP_SIZE, IPC_CREAT | IPC_EXCL | 0600);
+
+  if (bb_shm_id < 0) PFATAL("shmget() failed for basic block");
+
+  pass_shm_id = shmget(IPC_PRIVATE, sizeof(u32) * MAP_SIZE, IPC_CREAT | IPC_EXCL | 0600);
+
+  if(pass_shm_id<0) PFATAL("shmget() failed for pass string ");
+  
   atexit(remove_shm);
 
   shm_str = alloc_printf("%d", shm_id);
+  bb_shm_str = alloc_printf("%d", bb_shm_id);
+  pass_shm_str = alloc_printf("%d",pass_shm_id);
 
   setenv(SHM_ENV_VAR, shm_str, 1);
+  setenv(BB_SHM_ENV, bb_shm_str, 1);
+  setenv(PASS_SHN_EVN,pass_shm_str,1);
 
   ck_free(shm_str);
+  ck_free(bb_shm_str);
+  ck_free(pass_shm_str);
 
   trace_bits = shmat(shm_id, NULL, 0);
+  basic_blk_cov = shmat(bb_shm_id, NULL, 0);
+  pass_string_cov = shmat(pass_shm_id,NULL,0);
+  //实际共享的内存空间
+  memset(basic_blk_cov, 0, sizeof(u32) * MAP_SIZE);
+  memset(pass_string_cov, 0, sizeof(u32) * MAP_SIZE);
+  //非共享的内存空间
+  memset(br_string_pass, 0, sizeof(u32) * MAP_SIZE);
+  memset(br_string_visit, 0, sizeof(u32) * MAP_SIZE);
+  memset(seed_string_pass, 0, sizeof(u32) * MAP_SIZE);
+  memset(seed_string_visit, 0, sizeof(u32) * MAP_SIZE);
+  memset(seed_first_pass, 0, sizeof(u32) * MAP_SIZE);
+  memset(seed_first_visit, 0, sizeof(u32) * MAP_SIZE);
   
   if (trace_bits == (void *)-1) PFATAL("shmat() failed");
-
-
-  // 加入 其他bitmap
-
 
 }
 
@@ -259,6 +304,10 @@ static void run_target(char** argv) {
   if (!quiet_mode)
     SAYF("-- Program output begins --\n" cRST);
 
+  memset(trace_bits, 0, MAP_SIZE);
+  memset(pass_string_cov, 0, MAP_SIZE);
+  memset(basic_blk_cov, 0, MAP_SIZE);
+
   MEM_BARRIER();
 
   child_pid = fork();
@@ -272,7 +321,7 @@ static void run_target(char** argv) {
     if (quiet_mode) {
 
       s32 fd = open("/dev/null", O_RDWR);
-
+    
       if (fd < 0 || dup2(fd, 1) < 0 || dup2(fd, 2) < 0) {
         *(u32*)trace_bits = EXEC_FAIL_SIG;
         PFATAL("Descriptor initialization failed");
@@ -306,7 +355,7 @@ static void run_target(char** argv) {
     if (!getenv("LD_BIND_LAZY")) setenv("LD_BIND_NOW", "1", 0);
 
     setsid();
-
+    
     execv(target_path, argv);
 
     *(u32*)trace_bits = EXEC_FAIL_SIG;
@@ -427,46 +476,50 @@ static void setup_signal_handlers(void) {
 
 /* Detect @@ in args. */
 
-static void detect_file_args(char** argv) {
+  static void detect_file_args(char** argv) {
 
-  u32 i = 0;
-  u8* cwd = getcwd(NULL, 0);
+    u32 i = 0;
+    u8* cwd = getcwd(NULL, 0);
 
-  if (!cwd) PFATAL("getcwd() failed");
+    if (!cwd) PFATAL("getcwd() failed");
 
-  while (argv[i]) {
+    while (argv[i]) {
 
-    u8* aa_loc = strstr(argv[i], "@@");
+      u8* aa_loc = strstr(argv[i], "@@");
 
-    if (aa_loc) {
+      if (aa_loc) {
 
-      u8 *aa_subst, *n_arg;
+        u8 *aa_subst, *n_arg;
+        
+        // at_file设置为.cur_input  
+      
+        at_file = alloc_printf("%s/.cur_seed",in_dir);
+          //FATAL("@@ syntax is not supported by this tool.");
+        SAYF("using the default at_file path!\n");
+        
+        /* Be sure that we're always using fully-qualified paths. */
 
-      if (!at_file) FATAL("@@ syntax is not supported by this tool.");
+        if (at_file[0] == '/') aa_subst = at_file;
+        else aa_subst = alloc_printf("%s/%s", cwd, at_file);
 
-      /* Be sure that we're always using fully-qualified paths. */
+        /* Construct a replacement argv value. */
 
-      if (at_file[0] == '/') aa_subst = at_file;
-      else aa_subst = alloc_printf("%s/%s", cwd, at_file);
+        *aa_loc = 0;
+        n_arg = alloc_printf("%s%s%s", argv[i], aa_subst, aa_loc + 2);
+        argv[i] = n_arg;
+        *aa_loc = '@';
 
-      /* Construct a replacement argv value. */
+        if (at_file[0] != '/') ck_free(aa_subst);
 
-      *aa_loc = 0;
-      n_arg = alloc_printf("%s%s%s", argv[i], aa_subst, aa_loc + 2);
-      argv[i] = n_arg;
-      *aa_loc = '@';
+      }
 
-      if (at_file[0] != '/') ck_free(aa_subst);
+      i++;
 
     }
 
-    i++;
+    free(cwd); /* not tracked */
 
   }
-
-  free(cwd); /* not tracked */
-
-}
 
 
 /* Show banner. */
@@ -628,7 +681,95 @@ static char** get_qemu_argv(u8* own_loc, char** argv, int argc) {
 }
 
 
+static void write_bitmap(void) {
 
+  u8* fname;
+  s32 fd;
+  /* Save Br Visit Bitmap  */
+
+  fname = alloc_printf("%s/br_visit_bitmap", out_dir);
+  fd = open(fname, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+
+  if (fd < 0) PFATAL("Unable to open '%s'", fname);
+
+  ck_write(fd, br_string_visit, sizeof(u32) * MAP_SIZE, fname);
+
+  close(fd);
+
+    /* Save Br Pass Bitmap  */
+  fname = alloc_printf("%s/br_pass_bitmap", out_dir);
+  fd = open(fname, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+
+  if (fd < 0) PFATAL("Unable to open '%s'", fname);
+
+  ck_write(fd, br_string_pass, sizeof(u32) * MAP_SIZE, fname);
+
+  close(fd);
+
+  /* Save Seed Visit Bitmap  每个分支，种子的访问数量*/
+  fname = alloc_printf("%s/seed_visit_bitmap", out_dir);
+  fd = open(fname, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+
+  if (fd < 0) PFATAL("Unable to open '%s'", fname);
+
+  ck_write(fd, seed_string_visit, sizeof(u32) * MAP_SIZE, fname);
+
+  close(fd);
+
+  /* Save Seed Pass Bitmap  每个分支，种子的通过数量*/
+  fname = alloc_printf("%s/seed_pass_bitmap", out_dir);
+  fd = open(fname, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+
+  if (fd < 0) PFATAL("Unable to open '%s'", fname);
+
+  ck_write(fd, seed_string_pass, sizeof(u32) * MAP_SIZE, fname);
+
+  close(fd);
+
+
+  /* Save Seed First Visit Bitmap  */
+  fname = alloc_printf("%s/first_visit_bitmap", out_dir);
+  fd = open(fname, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+
+  if (fd < 0) PFATAL("Unable to open '%s'", fname);
+
+  ck_write(fd, seed_first_visit, sizeof(u32) * MAP_SIZE, fname);
+
+  close(fd);
+
+  /* Save Seed First Pass Bitmap  */
+  fname = alloc_printf("%s/first_pass_bitmap", out_dir);
+  fd = open(fname, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+
+  if (fd < 0) PFATAL("Unable to open '%s'", fname);
+
+  ck_write(fd, seed_first_pass, sizeof(u32) * MAP_SIZE, fname);
+
+  close(fd);
+
+  /* Save Seed Pass Num  */
+  fname = alloc_printf("%s/seed_pass_num", out_dir);
+  fd = open(fname, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+
+  if (fd < 0) PFATAL("Unable to open '%s'", fname);
+
+  write(fd, &seed_num_pass, sizeof(seed_num_pass));
+    
+  close(fd);
+
+  /* Save Seed Visit Num  */
+  fname = alloc_printf("%s/seed_visit_num", out_dir);
+  fd = open(fname, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+
+  if (fd < 0) PFATAL("Unable to open '%s'", fname);
+
+  write(fd, &seed_num_visit, sizeof(seed_num_visit));
+
+  close(fd);
+
+  ck_free(fname);
+
+}
 
 
 /* Main entry point */
@@ -642,14 +783,18 @@ int main(int argc, char** argv) {
 
   doc_path = access(DOC_PATH, F_OK) ? "docs" : DOC_PATH;
 
-  while ((opt = getopt(argc,argv,"+o:m:t:A:eqZQbcV")) > 0)
+  while ((opt = getopt(argc,argv,"+o:m:t:i:A:eqZQbcV")) > 0)
 
     switch (opt) {
 
+      case 'i':
+
+        in_dir = optarg;
+        break;
+
       case 'o':
 
-        if (out_file) FATAL("Multiple -o options not supported");
-        out_file = optarg;
+        out_dir = optarg;
         break;
 
       case 'm': {
@@ -766,8 +911,10 @@ int main(int argc, char** argv) {
 
     }
 
-  if (optind == argc || !out_file) usage(argv[0]);
+  if (optind == argc ) usage(argv[0]);
 
+  // 共享内存这一块，添加bitmap 
+  // 设置seed_pass_nums，seed_visit_nums等等，用来统计 ,类似afl-fuzz中实现的操作
   setup_shm();
   setup_signal_handlers();
 
@@ -781,22 +928,122 @@ int main(int argc, char** argv) {
   }
 
   detect_file_args(argv + optind);
+  //将输入到待测程序的用例，替换为in_dir/.cur_input
 
   if (qemu_mode)
     use_argv = get_qemu_argv(argv[0], argv + optind, argc - optind);
   else
     use_argv = argv + optind;
 
-  run_target(use_argv);
+  struct dirent **entry; 
+  int n;
 
-  tcnt = write_results();
+  n = scandir(in_dir, &entry, NULL, alphasort);
+  if (n < 0) {
+      perror("scandir failed");
+      return 1;
+  }
 
-  if (!quiet_mode) {
+  // 输出排序后的文件名，跳过 "." 和 ".."
+  for (int i = 0; i < n; i++) {
+  // 跳过 "."、".." 和 ".cur_seed"
+    if (strcmp(entry[i]->d_name, ".") == 0 || strcmp(entry[i]->d_name, "..") == 0 
+    || strcmp(entry[i]->d_name, ".cur_seed") == 0 ||strcmp(entry[i]->d_name, ".cur_input") == 0 
+    || strcmp(entry[i]->d_name, ".state") == 0) {
+        continue;
+    }
+    if(i==5) continue;
+    printf("%s\n",entry[i]->d_name);      
+    
+    u8* fn = alloc_printf("%s/%s",in_dir,entry[i]->d_name);
 
-    if (!tcnt) FATAL("No instrumentation detected" cRST);
-    OKF("Captured %u tuples in '%s'." cRST, tcnt, out_file);
+    int fd = open(fn, O_RDONLY);
+
+    if (fd < 0) {
+        perror("open failed");
+        continue;
+    }
+    
+    struct stat st;
+    
+    if (fstat(fd, &st) < 0) {
+        perror("fstat failed");
+        close(fd);
+        continue;
+    }
+
+    void *in_buf = mmap(0, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+
+    if (in_buf == MAP_FAILED) {
+        perror("mmap failed");
+        close(fd);
+        continue;
+    }
+
+    int out_fd = open(at_file, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (out_fd < 0) {
+        perror("open at_file failed");
+        munmap(in_buf, st.st_size);
+        close(fd);
+        continue;
+    }
+    lseek(out_fd, 0, SEEK_SET);
+
+    ck_write(out_fd, in_buf, st.st_size, at_file);
+
+    run_target(use_argv);
+    
+    total_execs++;
+    
+    for(int i=0;i<MAP_SIZE;i++){
+      if(pass_string_cov[i]!=0){
+
+        br_string_pass[i]+=pass_string_cov[i];
+        seed_string_pass[i]++;
+        if(seed_first_pass[i]==0){
+          seed_first_pass[i]=total_execs;
+        }
+        if(!is_seed_pass) is_seed_pass = 1;
+      }
+
+      if(basic_blk_cov[i]!=0){
+
+        br_string_visit[i]+=basic_blk_cov[i];
+        seed_string_visit[i]++;
+
+        if(seed_first_visit[i]==0){
+          seed_first_visit[i]=total_execs;
+        }
+        if(!is_seed_visit) is_seed_visit = 1;
+      }
+    }
+
+    if(is_seed_pass) {
+      seed_num_pass++;
+      is_seed_pass=0;
+    }
+
+    if(is_seed_visit){
+      seed_num_visit++;
+      is_seed_pass=0;
+    }
+  
+    write_bitmap();
+
+    munmap(in_buf, st.st_size);
+    close(fd);
+    close(out_fd);
 
   }
+
+  // tcnt = write_results();
+
+  // if (!quiet_mode) {
+
+  //   if (!tcnt) FATAL("No instrumentation detected" cRST);
+  //   OKF("Captured %u tuples in '%s'." cRST, tcnt, out_file);
+
+  // }
 
   exit(child_crashed * 2 + child_timed_out);
 
