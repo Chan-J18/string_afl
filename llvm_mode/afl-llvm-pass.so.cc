@@ -64,6 +64,7 @@ namespace {
       std::unordered_map<u32,u32> passSet;
       std::unordered_set<std::string> handledFunc;
       std::unordered_set<Value*> stringValue;
+      StringRef soureceFileName;
      
       AFLCoverage() : ModulePass(ID) { }
 
@@ -472,14 +473,18 @@ bool AFLCoverage::runOnModule(Module &M) {
   int instBrNum = 0;
   int brNum = 0 ;
   Function* mainFunc =  M.getFunction("main");
-  StringRef soureceFileName;
+
 
   for (auto CU : M.debug_compile_units()) {
 
     StringRef fileName = CU->getFilename();
-   
-    if(soureceFileName.empty())  soureceFileName = fileName;
-    else if(fileName == soureceFileName) break;
+
+    if(soureceFileName.empty()) {
+      
+      soureceFileName = fileName;
+      break;
+
+    }else if(fileName == soureceFileName) break;
     else return false;
 
   }
@@ -498,7 +503,7 @@ bool AFLCoverage::runOnModule(Module &M) {
   //   return 1;
   // }
 
-
+  
   for (auto &F : M){
     for (auto &BB : F) {
       
